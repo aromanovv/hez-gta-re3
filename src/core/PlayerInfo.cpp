@@ -408,14 +408,18 @@ CVector
 FindPlayerCoors(void)
 {
 #ifdef FIX_BUGS
-	if (CReplay::IsPlayingBack())
-		return TheCamera.GetPosition();
+    if (CReplay::IsPlayingBack())
+        return TheCamera.GetPosition();
 #endif
-	CPlayerPed *ped = FindPlayerPed();
-	if(ped->InVehicle())
-		return ped->m_pMyVehicle->GetPosition();
-	else
-		return ped->GetPosition();
+    // Route world position to Free Cam when active
+    if (CCamera::bFreeCamMode)
+        return CCamera::m_vecFreeCamPos;
+
+    CPlayerPed *ped = FindPlayerPed();
+    if(ped->InVehicle())
+        return ped->m_pMyVehicle->GetPosition();
+    else
+        return ped->GetPosition();
 }
 
 const CVector &
@@ -470,25 +474,33 @@ const CVector &
 FindPlayerCentreOfWorld(int32 player)
 {
 #ifdef FIX_BUGS
-	if(CReplay::IsPlayingBack()) return TheCamera.GetPosition();
+    if(CReplay::IsPlayingBack()) return TheCamera.GetPosition();
 #endif
-	if(CCarCtrl::bCarsGeneratedAroundCamera) return TheCamera.GetPosition();
-	if(CWorld::Players[player].m_pRemoteVehicle) return CWorld::Players[player].m_pRemoteVehicle->GetPosition();
-	if(FindPlayerVehicle()) return FindPlayerVehicle()->GetPosition();
-	return CWorld::Players[player].m_pPed->GetPosition();
+    // Route traffic and ped generation center to Free Cam
+    if (CCamera::bFreeCamMode)
+        return CCamera::m_vecFreeCamPos;
+
+    if(CCarCtrl::bCarsGeneratedAroundCamera) return TheCamera.GetPosition();
+    if(CWorld::Players[player].m_pRemoteVehicle) return CWorld::Players[player].m_pRemoteVehicle->GetPosition();
+    if(FindPlayerVehicle()) return FindPlayerVehicle()->GetPosition();
+    return CWorld::Players[player].m_pPed->GetPosition();
 }
 
 const CVector &
 FindPlayerCentreOfWorld_NoSniperShift(void)
 {
 #ifdef FIX_BUGS
-	if (CReplay::IsPlayingBack()) return TheCamera.GetPosition();
+    if (CReplay::IsPlayingBack()) return TheCamera.GetPosition();
 #endif
-	if(CCarCtrl::bCarsGeneratedAroundCamera) return TheCamera.GetPosition();
-	if(CWorld::Players[CWorld::PlayerInFocus].m_pRemoteVehicle)
-		return CWorld::Players[CWorld::PlayerInFocus].m_pRemoteVehicle->GetPosition();
-	if(FindPlayerVehicle()) return FindPlayerVehicle()->GetPosition();
-	return FindPlayerPed()->GetPosition();
+    // Route traffic and ped generation center to Free Cam
+    if (CCamera::bFreeCamMode)
+        return CCamera::m_vecFreeCamPos;
+
+    if(CCarCtrl::bCarsGeneratedAroundCamera) return TheCamera.GetPosition();
+    if(CWorld::Players[CWorld::PlayerInFocus].m_pRemoteVehicle)
+        return CWorld::Players[CWorld::PlayerInFocus].m_pRemoteVehicle->GetPosition();
+    if(FindPlayerVehicle()) return FindPlayerVehicle()->GetPosition();
+    return FindPlayerPed()->GetPosition();
 }
 
 float

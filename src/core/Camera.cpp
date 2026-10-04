@@ -1,5 +1,6 @@
 #include "common.h"
 
+#include "Streaming.h"
 #include "main.h"
 #include "Draw.h"
 #include "World.h"
@@ -31,6 +32,8 @@
 #include "Debug.h"
 #include "GenericGameStorage.h"
 #include "MemoryCard.h"
+#include "Font.h"
+#include "Sprite2d.h"
 #include "Camera.h"
 
 enum
@@ -251,9 +254,21 @@ CCamera::Init(void)
 	m_f3rdPersonCHairMultY = 0.4f;
 }
 
+static inline bool IsKeyDown(int key) {
+    return ControlsManager.GetIsKeyboardKeyDown((RsKeyCodes)key);
+}
+
+static inline bool IsKeyJustDown(int key) {
+    return ControlsManager.GetIsKeyboardKeyJustDown((RsKeyCodes)key);
+}
+
 void
 CCamera::Process(void)
 {
+	if (bFreeCamMode) {
+        ProcessFreeCam();
+        return;
+    }
 	// static bool InterpolatorNotInitialised = true;	// unused
 	static CVector PreviousFudgedTargetCoors;	// only PS2
 	static float PlayerMinDist = 1.6f;	// not on PS2
@@ -769,23 +784,40 @@ CCamera::Process(void)
 	m_bToggleWorldViewer = false;
 }
 
-// Pad presses last one logical frame but the camera runs each rendered frame, so they
-// are kept here until Process() has had them
-void
-CCamera::UpdatePadInput(void)
+void CCamera::UpdatePadInput(void)
 {
-	if(CTimer::GetIsPaused())
-		return;
-	if(CPad::GetPad(0)->CycleCameraModeUpJustDown())
-		m_bCycleCamModeUp = true;
-	if(CPad::GetPad(0)->CycleCameraModeDownJustDown())
-		m_bCycleCamModeDown = true;
-#ifdef IMPROVED_CAMERA
-	if(CPad::GetPad(1)->GetCircleJustDown() || CTRLJUSTDOWN('B'))
-#else
-	if(CPad::GetPad(1)->GetCircleJustDown())
-#endif
-		m_bToggleWorldViewer = true;
+    if (CTimer::GetIsPaused()) {
+        bToolsMenuOpen = false; // Hide menu on ESC / pause
+        return;
+    }
+
+    // Toggle Tools Menu with TILDE (~) / GRAVE key
+    if (IsKeyJustDown('~') || IsKeyJustDown('`')) {
+        bToolsMenuOpen = !bToolsMenuOpen;
+    }
+
+    if (bToolsMenuOpen) {
+        ProcessToolsMenuInputs();
+        return; // Suspend camera flight while interacting with menu
+    }
+
+    // Toggle free cam with TAB (ignoring ALT+TAB)
+    bool tabJustDown = IsKeyJustDown(rsTAB);
+    bool altDown = IsKeyDown(rsLALT) || IsKeyDown(rsRALT);
+
+    if (tabJustDown && !altDown) {
+        ToggleFreeCam();
+    }
+
+    if (bFreeCamMode)
+        return;
+
+    if (CPad::GetPad(0)->CycleCameraModeUpJustDown())
+        m_bCycleCamModeUp = true;
+    if (CPad::GetPad(0)->CycleCameraModeDownJustDown())
+        m_bCycleCamModeDown = true;
+    if (CPad::GetPad(1)->GetCircleJustDown())
+        m_bToggleWorldViewer = true;
 }
 
 void
@@ -3751,4 +3783,338 @@ CCamPathSplines::CCamPathSplines(void)
 	int i;
 	for(i = 0; i < MAXPATHLENGTH; i++)
 		m_arr_PathData[i] = 0.0f;
+}
+
+// Static variable definitions
+bool CCamera::bFreeCamMode = false;
+CVector CCamera::m_vecFreeCamPos(0.0f, 0.0f, 0.0f);
+
+bool CCamera::bToolsMenuOpen = false;
+int CCamera::iToolsMenuSelected = 0;
+bool CCamera::bExperimentalPedClipping = false;
+float CCamera::fFreeCamTimeScale = 1.0f;  // Default 100%
+float CCamera::fFreeCamMoveSpeed = 0.18f;  // Default 0.18
+float CCamera::fFreeCamFOV       = 70.0f;  // Default 70°
+float CCamera::fFreeCamInertia   = 0.82f;  // Default 82%
+
+// Free Cam Motion State Variables
+static CVector m_vecFreeCamVelocity(0.0f, 0.0f, 0.0f);
+static float m_fFreeCamYawVel = 0.0f;
+static float m_fFreeCamPitchVel = 0.0f;
+
+
+void CCamera::ProcessToolsMenuInputs(void)
+{
+    if (CTimer::GetIsPaused()) {
+        bToolsMenuOpen = false;
+        return;
+    }
+
+    // Item Selection (Arrow Up / Down ONLY)
+    if (IsKeyJustDown(rsUP)) {
+        iToolsMenuSelected = (iToolsMenuSelected + 4) % 5; // 5 menu items (0..4)
+    }
+    if (IsKeyJustDown(rsDOWN)) {
+        iToolsMenuSelected = (iToolsMenuSelected + 1) % 5;
+    }
+
+    // Adjust Selected Value (Arrow Left / Right ONLY)
+    bool left  = IsKeyJustDown(rsLEFT);
+    bool right = IsKeyJustDown(rsRIGHT);
+    bool reset = IsKeyJustDown(rsENTER) || IsKeyJustDown(' ');
+
+    switch (iToolsMenuSelected) {
+    case 0: // Experimental Ped Clipping Toggle
+        if (left || right || reset)
+            bExperimentalPedClipping = !bExperimentalPedClipping;
+        break;
+
+    case 1: // Game Speed (0.10f to 4.00f)
+        if (left)  fFreeCamTimeScale = Clamp(fFreeCamTimeScale - 0.10f, 0.10f, 4.00f);
+        if (right) fFreeCamTimeScale = Clamp(fFreeCamTimeScale + 0.10f, 0.10f, 4.00f);
+        if (reset) fFreeCamTimeScale = 1.00f;
+        break;
+
+    case 2: // Camera Speed (0.05f to 2.00f)
+        if (left)  fFreeCamMoveSpeed = Clamp(fFreeCamMoveSpeed - 0.02f, 0.05f, 2.00f);
+        if (right) fFreeCamMoveSpeed = Clamp(fFreeCamMoveSpeed + 0.02f, 0.05f, 2.00f);
+        if (reset) fFreeCamMoveSpeed = 0.18f;
+        break;
+
+    case 3: // Camera FOV (10.0f to 120.0f)
+        if (left)  fFreeCamFOV = Clamp(fFreeCamFOV - 5.0f, 10.0f, 120.0f);
+        if (right) fFreeCamFOV = Clamp(fFreeCamFOV + 5.0f, 10.0f, 120.0f);
+        if (reset) fFreeCamFOV = DefaultFOV;
+        break;
+
+    case 4: // Camera Inertia / Ease In-Out (0.00f to 0.95f)
+        if (left)  fFreeCamInertia = Clamp(fFreeCamInertia - 0.05f, 0.00f, 0.95f);
+        if (right) fFreeCamInertia = Clamp(fFreeCamInertia + 0.05f, 0.00f, 0.95f);
+        if (reset) fFreeCamInertia = 0.82f;
+        break;
+    }
+}
+void CCamera::DrawToolsMenu(void)
+{
+    // Hide menu if closed or game is paused
+    if (!bToolsMenuOpen || CTimer::GetIsPaused())
+        return;
+
+    float startX = SCREEN_SCALE_X(20.0f);
+    float startY = SCREEN_SCALE_Y(20.0f);
+    float labelWidth = SCREEN_SCALE_X(190.0f);
+    float trackWidth = SCREEN_SCALE_X(120.0f);
+    float trackHeight = SCREEN_SCALE_Y(10.0f);
+    float lineHeight = SCREEN_SCALE_Y(22.0f);
+
+    wchar ustr[128];
+    char textBuf[128];
+
+    // Header Title
+    CFont::SetScale(SCREEN_SCALE_X(0.42f), SCREEN_SCALE_Y(0.70f));
+    CFont::SetFontStyle(FONT_HEADING);
+    CFont::SetBackgroundOff();
+    CFont::SetPropOn();
+    CFont::SetCentreOff();
+    CFont::SetRightJustifyOff();
+    CFont::SetColor(CRGBA(243, 237, 71, 255)); // Yellow
+    AsciiToUnicode("TOOLS MENU", ustr);
+    CFont::PrintString(startX, startY, ustr);
+    startY += SCREEN_SCALE_Y(26.0f);
+
+    // Font setup for menu rows
+    CFont::SetScale(SCREEN_SCALE_X(0.35f), SCREEN_SCALE_Y(0.60f));
+    CFont::SetFontStyle(FONT_BANK);
+
+    const char* menuLabels[5] = {
+        "Experimental Ped Clipping",
+        "Game Speed",
+        "Camera Speed",
+        "Camera FOV",
+        "Camera Inertia (Ease)"
+    };
+
+    for (int i = 0; i < 5; i++) {
+        float itemY = startY + i * lineHeight;
+        bool isSelected = (i == iToolsMenuSelected);
+
+        // Label Color: Highlight active item
+        if (isSelected) {
+            CFont::SetColor(CRGBA(243, 237, 71, 255)); // Yellow
+        } else {
+            CFont::SetColor(CRGBA(190, 190, 190, 220)); // Light Gray
+        }
+
+        // Draw Label with selection arrow indicator
+        sprintf(textBuf, "%s %s:", isSelected ? ">" : " ", menuLabels[i]);
+        AsciiToUnicode(textBuf, ustr);
+        CFont::PrintString(startX, itemY, ustr);
+
+        float trackX = startX + labelWidth;
+
+        if (i == 0) {
+            // Option 0: YES / NO Toggle
+            if (isSelected)
+                CFont::SetColor(CRGBA(243, 237, 71, 255));
+            else
+                CFont::SetColor(CRGBA(190, 190, 190, 220));
+
+            sprintf(textBuf, "< %s >", bExperimentalPedClipping ? "YES" : "NO");
+            AsciiToUnicode(textBuf, ustr);
+            CFont::PrintString(trackX, itemY, ustr);
+        } 
+        else {
+            // Options 1..4: Sliders
+            float norm = 0.0f;
+            switch (i) {
+            case 1: norm = (fFreeCamTimeScale - 0.10f) / 3.90f; break;
+            case 2: norm = (fFreeCamMoveSpeed - 0.05f) / 1.95f; break;
+            case 3: norm = (fFreeCamFOV - 10.0f) / 110.0f;      break;
+            case 4: norm = fFreeCamInertia / 0.95f;              break;
+            }
+            norm = Clamp(norm, 0.0f, 1.0f);
+
+            float fillWidth = norm * trackWidth;
+            float knobX = trackX + fillWidth;
+
+            // Background Track
+            CSprite2d::DrawRect(CRect(trackX, itemY + SCREEN_SCALE_Y(3.0f), trackX + trackWidth, itemY + SCREEN_SCALE_Y(3.0f) + trackHeight), CRGBA(40, 48, 60, 200));
+
+            // Filled Bar Progress
+            CRGBA barColor = isSelected ? CRGBA(243, 237, 71, 240) : CRGBA(160, 160, 160, 200);
+            CSprite2d::DrawRect(CRect(trackX, itemY + SCREEN_SCALE_Y(3.0f), trackX + fillWidth, itemY + SCREEN_SCALE_Y(3.0f) + trackHeight), barColor);
+
+            // Slider Knob Indicator
+            CSprite2d::DrawRect(CRect(knobX - SCREEN_SCALE_X(2.0f), itemY + SCREEN_SCALE_Y(1.0f), knobX + SCREEN_SCALE_X(2.0f), itemY + SCREEN_SCALE_Y(5.0f) + trackHeight), CRGBA(255, 255, 255, 255));
+
+            // Value Text
+            CFont::SetColor(isSelected ? CRGBA(255, 255, 255, 255) : CRGBA(180, 180, 180, 220));
+            switch (i) {
+            case 1: sprintf(textBuf, "%.0f%%", fFreeCamTimeScale * 100.0f); break;
+            case 2: sprintf(textBuf, "%.2f", fFreeCamMoveSpeed);            break;
+            case 3: sprintf(textBuf, "%.0f deg", fFreeCamFOV);              break;
+            case 4: sprintf(textBuf, "%.0f%%", fFreeCamInertia * 100.0f);    break;
+            }
+            AsciiToUnicode(textBuf, ustr);
+            CFont::PrintString(trackX + trackWidth + SCREEN_SCALE_X(12.0f), itemY, ustr);
+        }
+    }
+
+    // Footer Help Text
+    startY += 5 * lineHeight + SCREEN_SCALE_Y(4.0f);
+    CFont::SetScale(SCREEN_SCALE_X(0.32f), SCREEN_SCALE_Y(0.55f));
+    CFont::SetColor(CRGBA(150, 150, 150, 200));
+    AsciiToUnicode("[W/S] Select   [A/D] Adjust   [TILDE] Close", ustr);
+    CFont::PrintString(startX, startY, ustr);
+}
+
+
+void CCamera::ToggleFreeCam(void)
+{
+    bFreeCamMode = !bFreeCamMode;
+    CPlayerPed* player = FindPlayerPed();
+
+    if (bFreeCamMode) {
+        // Start free cam from current camera position
+        m_vecFreeCamPos = GetPosition();
+        
+        // Orient initial direction from current camera forward vector
+        CVector front = GetForward();
+        m_fFreeCamYaw = CGeneral::GetATanOfXY(front.x, front.y);
+        m_fFreeCamPitch = Asin(Clamp(front.z, -1.0f, 1.0f));
+
+        // Clear momentum on enter
+        m_vecFreeCamVelocity = CVector(0.0f, 0.0f, 0.0f);
+        m_fFreeCamYawVel = 0.0f;
+        m_fFreeCamPitchVel = 0.0f;
+
+        if (player) {
+            player->m_bCanBeDamaged = false;               // Invincibility ON
+            player->m_vecMoveSpeed = CVector(0.0f, 0.0f, 0.0f); // Stop player movement
+        }
+
+        // Apply persistent freecam timescale
+        CTimer::SetTimeScale(fFreeCamTimeScale);
+    } else {
+        if (player) {
+            player->m_bCanBeDamaged = true;                // Invincibility OFF
+            
+            // Re-enable player controls
+            CPad::GetPad(0)->SetEnablePlayerControls(PLAYERCONTROL_CAMERA);
+        }
+
+        // Reset game timescale back to 1.0x upon exiting
+        CTimer::SetTimeScale(1.0f);
+
+        // Snap camera back to standard view
+        RestoreWithJumpCut();
+    }
+}
+
+void CCamera::ProcessFreeCam(void)
+{
+    if (!bFreeCamMode)
+        return;
+
+    // Disable player character controls while camera is flying
+    CPad::GetPad(0)->SetDisablePlayerControls(PLAYERCONTROL_CAMERA);
+
+    // Mouse Wheel Adjusts Game Speed during flight (updates menu value automatically)
+    if (CPad::GetPad(0)->GetMouseWheelUp()) {
+        fFreeCamTimeScale = Clamp(fFreeCamTimeScale + 0.10f, 0.10f, 4.00f);
+    }
+    if (CPad::GetPad(0)->GetMouseWheelDown()) {
+        fFreeCamTimeScale = Clamp(fFreeCamTimeScale - 0.10f, 0.10f, 4.00f);
+    }
+    if (CPad::NewMouseControllerState.MMB) {
+        fFreeCamTimeScale = 1.00f; // Reset to 100%
+    }
+
+    // Apply active timescale
+    CTimer::SetTimeScale(fFreeCamTimeScale);
+
+    // 1. Mouse Look with Adjustable Inertia / Smoothness
+    float rawMouseX = CPad::NewMouseControllerState.x * 0.0020f;
+    float rawMouseY = CPad::NewMouseControllerState.y * 0.0020f;
+
+    float rotDamp = (fFreeCamInertia > 0.0f) ? (1.0f - Pow(fFreeCamInertia * 0.8f, CTimer::GetTimeStep())) : 1.0f;
+    m_fFreeCamYawVel   += (rawMouseX - m_fFreeCamYawVel) * rotDamp;
+    m_fFreeCamPitchVel += (rawMouseY - m_fFreeCamPitchVel) * rotDamp;
+
+    m_fFreeCamYaw += m_fFreeCamYawVel;
+    m_fFreeCamPitch = Clamp(m_fFreeCamPitch + m_fFreeCamPitchVel, -DEGTORAD(89.0f), DEGTORAD(89.0f));
+
+    // Calculate orientation vectors
+    CVector front;
+    front.x = Cos(m_fFreeCamPitch) * Sin(m_fFreeCamYaw);
+    front.y = Cos(m_fFreeCamPitch) * Cos(m_fFreeCamYaw);
+    front.z = Sin(m_fFreeCamPitch);
+    front.Normalise();
+
+    CVector right;
+    right.x = Cos(m_fFreeCamYaw);
+    right.y = -Sin(m_fFreeCamYaw);
+    right.z = 0.0f;
+    right.Normalise();
+
+    CVector up = CrossProduct(right, front);
+    up.Normalise();
+
+    // 2. Flight Movement with Independent Camera Speed & Inertia
+    float maxSpeed = fFreeCamMoveSpeed;
+    if (IsKeyDown(rsLSHIFT) || IsKeyDown(rsRSHIFT))
+        maxSpeed *= 5.0f; // 5x speed boost when holding Shift
+
+    CVector targetMoveDir(0.0f, 0.0f, 0.0f);
+
+    if (IsKeyDown('W') || IsKeyDown('w'))
+        targetMoveDir += front;
+    if (IsKeyDown('S') || IsKeyDown('s'))
+        targetMoveDir -= front;
+    if (IsKeyDown('D') || IsKeyDown('d'))
+        targetMoveDir += right; // Move Right
+    if (IsKeyDown('A') || IsKeyDown('a'))
+        targetMoveDir -= right; // Move Left
+
+    // Vertical Ascent / Descent (LMB / RMB)
+    if (CPad::NewMouseControllerState.LMB)
+        targetMoveDir.z += 1.0f;
+    if (CPad::NewMouseControllerState.RMB)
+        targetMoveDir.z -= 1.0f;
+
+    CVector targetVelocity(0.0f, 0.0f, 0.0f);
+    if (targetMoveDir.MagnitudeSqr() > 0.001f) {
+        targetMoveDir.Normalise();
+        targetVelocity = targetMoveDir * maxSpeed;
+    }
+
+    // Exponential movement velocity damping
+    float moveDamp = (fFreeCamInertia > 0.0f) ? (1.0f - Pow(fFreeCamInertia, CTimer::GetTimeStep())) : 1.0f;
+    m_vecFreeCamVelocity += (targetVelocity - m_vecFreeCamVelocity) * moveDamp;
+
+    // Apply linear displacement
+    m_vecFreeCamPos += m_vecFreeCamVelocity * CTimer::GetTimeStep();
+
+    // Apply transform matrix
+    GetMatrix().GetRight() = CrossProduct(up, front);
+    GetMatrix().GetForward() = front;
+    GetMatrix().GetUp() = up;
+    GetMatrix().GetPosition() = m_vecFreeCamPos;
+
+    CalculateDerivedValues();
+
+    // Apply custom FOV
+    CDraw::SetFOV(fFreeCamFOV);
+
+    RwCameraSetNearClipPlane(Scene.camera, DEFAULT_NEAR);
+
+    // Update RenderWare camera frame
+    RwFrame* frame = RwCameraGetFrame(m_pRwCamera);
+    m_vecGameCamPos = GetPosition();
+    *RwMatrixGetPos(RwFrameGetMatrix(frame)) = GetPosition();
+    *RwMatrixGetAt(RwFrameGetMatrix(frame)) = GetForward();
+    *RwMatrixGetUp(RwFrameGetMatrix(frame)) = GetUp();
+    *RwMatrixGetRight(RwFrameGetMatrix(frame)) = GetRight();
+    RwMatrixUpdate(RwFrameGetMatrix(frame));
+    RwFrameUpdateObjects(frame);
 }

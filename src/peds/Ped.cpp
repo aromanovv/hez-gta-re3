@@ -4947,6 +4947,47 @@ CPed::Render(void)
 			return;
 	}
 
+	bool nearClipChanged = false;
+	float oldNearClip = RwCameraGetNearClipPlane(Scene.camera);
+
+	// Slice pedestrian mesh in-place when Free Cam & Experimental Ped Clipping are active
+	if (CCamera::bFreeCamMode && CCamera::bExperimentalPedClipping) {
+		CVector camPos = TheCamera.GetPosition();
+		CVector pedPos = GetPosition();
+		pedPos.z += 0.2f; // Target torso center height
+
+		CVector dir = pedPos - camPos;
+
+		// Distance along camera view axis
+		float depthInView = DotProduct(dir, TheCamera.GetForward());
+
+		// Only apply slicing if ped is in front of camera
+		if (depthInView > 0.5f) {
+			// Line-of-Sight Check:
+			// If ped is behind a building, vehicle, or object, DO NOT alter near clip.
+			// This prevents peds from being rendered through walls and cars!
+			if (CWorld::GetIsLineOfSightClear(camPos, pedPos, true, true, false, true, false, true, true)) {
+				// Unique per-pedestrian phase offset for desynchronized oscillation
+				float pedPhase = (m_randomSeed * 37 + (uint32)((uintptr)this >> 4)) * 0.001f;
+
+				// Smooth sine wave cycle bounded in range [0.0, 1.0]
+				float cycle = (Sin(CTimer::GetTimeInMilliseconds() * 0.003f + pedPhase) + 1.0f) * 0.5f;
+
+				// Tight offset window (-0.03m to +0.03m around torso center):
+				// Keeps the slice plane strictly between 40% and 60% of body thickness.
+				float sliceOffset = -0.03f + 0.06f * cycle;
+				float pedNearClip = Max(0.05f, depthInView + sliceOffset);
+
+				// Apply custom near clip plane for this pedestrian's draw call
+				RwCameraSetNearClipPlane(Scene.camera, pedNearClip);
+				RwCameraEndUpdate(Scene.camera);
+				RwCameraBeginUpdate(Scene.camera);
+				nearClipChanged = true;
+			}
+		}
+	}
+
+	// Render pedestrian mesh
 	CEntity::Render();
 
 #ifdef PED_SKIN
@@ -4965,6 +5006,13 @@ CPed::Render(void)
 		RpAtomicRender(m_pWeaponModel);
 	}
 #endif
+
+	// Restore original camera near-clip plane for subsequent rendering
+	if (nearClipChanged) {
+		RwCameraSetNearClipPlane(Scene.camera, oldNearClip);
+		RwCameraEndUpdate(Scene.camera);
+		RwCameraBeginUpdate(Scene.camera);
+	}
 }
 
 void

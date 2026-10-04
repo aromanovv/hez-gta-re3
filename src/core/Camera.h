@@ -342,6 +342,27 @@ enum
 class CCamera : public CPlaceable
 {
 public:
+
+    float m_fFreeCamYaw;
+    float m_fFreeCamPitch;
+    
+	static bool bFreeCamMode;
+    static CVector m_vecFreeCamPos;
+    
+    // Tools Menu & Experimental Settings
+    static bool bToolsMenuOpen;
+    static int iToolsMenuSelected; // 0..4 active selection
+    static bool bExperimentalPedClipping;
+    static float fFreeCamTimeScale;  // Game timescale (0.10f to 4.00f)
+    static float fFreeCamMoveSpeed;  // Independent camera speed (0.05f to 2.00f)
+    static float fFreeCamFOV;        // Camera FOV (10.0f to 120.0f)
+    static float fFreeCamInertia;    // Ease in/out (0.00f to 0.95f)
+
+    void ToggleFreeCam(void);
+    void ProcessFreeCam(void);
+    
+    static void ProcessToolsMenuInputs(void);
+    static void DrawToolsMenu(void);
 	bool m_bAboveGroundTrainNodesLoaded;
 	bool m_bBelowGroundTrainNodesLoaded;
 	bool m_bCamDirectlyBehind;

@@ -1557,6 +1557,7 @@ Render2dStuffAfterFade(void)
 #endif
 
 	CHud::DrawAfterFade();
+	CCamera::DrawToolsMenu(); // Draw Tools Menu overlay
 	CFont::DrawFonts();
 	POP_RENDERGROUP();
 }

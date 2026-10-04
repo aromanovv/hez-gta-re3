@@ -319,6 +319,8 @@ void CHud::SetVehicleName(wchar *name)
 
 void CHud::Draw()
 {
+	if (CCamera::bFreeCamMode)
+        return;
 	// disable hud via second controller
 	if (CPad::GetPad(1)->GetStartJustDown())
 		m_Wants_To_Draw_Hud = !m_Wants_To_Draw_Hud;
