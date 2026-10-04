@@ -47,6 +47,7 @@
 #include "Camera.h"
 #include "Radar.h"
 
+
 uint8 CReplay::Mode;
 CAddressInReplayBuffer CReplay::Record;
 CAddressInReplayBuffer CReplay::Playback;
@@ -117,6 +118,12 @@ uint8* CReplay::paProjectileInfo;
 uint8* CReplay::paProjectiles;
 int CReplay::nHandleOfPlayerPed[NUMPLAYERS];
 #endif
+CMatrix CReplay::PrevCamMatrix;
+CMatrix CReplay::RealCamMatrix;
+CVector CReplay::RealCamGamePos;
+bool CReplay::bCamPrevValid;
+bool CReplay::bCamInterpolated;
+CVector CReplay::PrevCamFocus;
 
 static void(*CBArray[])(CAnimBlendAssociation*, void*) =
 {
@@ -525,8 +532,14 @@ void CReplay::ProcessPedUpdate(CPed *ped, float interpolation, CAddressInReplayB
 	ped->RemoveWeaponModel(-1);
 	if (pp->weapon_model != (uint8)-1)
 		ped->AddWeaponModel(pp->weapon_model);
+#ifdef FIX_REPLAY_BUGS
+	bool previousMatrixValid = ped->m_bPrevMatrixValid;
+#endif
 	CWorld::Remove(ped);
 	CWorld::Add(ped);
+#ifdef FIX_REPLAY_BUGS
+	ped->m_bPrevMatrixValid = previousMatrixValid;
+#endif
 	buffer->m_nOffset += sizeof(tPedUpdatePacket);
 }
 
@@ -785,8 +798,14 @@ void CReplay::ProcessCarUpdate(CVehicle *vehicle, float interpolation, CAddressI
 	vehicle->bEngineOn = true;
 	if (vehicle->IsCar())
 		((CAutomobile*)vehicle)->m_nDriveWheelsOnGround = 4;
+#ifdef FIX_REPLAY_BUGS
+	bool previousMatrixValid = vehicle->m_bPrevMatrixValid;
+#endif
 	CWorld::Remove(vehicle);
 	CWorld::Add(vehicle);
+#ifdef FIX_REPLAY_BUGS
+	vehicle->m_bPrevMatrixValid = previousMatrixValid;
+#endif
 	if (vehicle->IsBoat())
 		((CBoat*)vehicle)->m_bIsAnchored = false;
 }
@@ -1026,6 +1045,73 @@ void CReplay::EmptyReplayBuffer(void)
 	BufferStatus[0] = REPLAYBUFFER_RECORD;
 	Record.m_pBase[Record.m_nOffset] = 0;
 	MarkEverythingAsNew();
+}
+
+static void SyncReplayRwCamera(void)
+{
+	RwMatrix* pm = RwFrameGetMatrix(RwCameraGetFrame(TheCamera.m_pRwCamera));
+	pm->pos = TheCamera.GetPosition();
+	pm->at = TheCamera.GetForward();
+	pm->up = TheCamera.GetUp();
+	pm->right = TheCamera.GetRight();
+	TheCamera.m_vecGameCamPos = TheCamera.GetPosition();
+	TheCamera.CalculateDerivedValues();
+	RwMatrixUpdate(RwFrameGetMatrix(RwCameraGetFrame(TheCamera.m_pRwCamera)));
+	RwFrameUpdateObjects(RwCameraGetFrame(TheCamera.m_pRwCamera));
+}
+
+void CReplay::SnapshotCamera(void)
+{
+	if (Mode != MODE_PLAYBACK) {
+		bCamPrevValid = false;
+		return;
+	}
+	PrevCamMatrix.CopyOnlyMatrix(TheCamera.GetMatrix());
+	PrevCamFocus = CVector(CameraFocusX, CameraFocusY, CameraFocusZ);
+	bCamPrevValid = true;
+}
+
+void CReplay::InterpolateCamera(float t)
+{
+	if (Mode != MODE_PLAYBACK || bCamInterpolated)
+		return;
+
+	RealCamMatrix.CopyOnlyMatrix(TheCamera.GetMatrix());
+	RealCamGamePos = TheCamera.m_vecGameCamPos;
+
+	CVector curFocus(CameraFocusX, CameraFocusY, CameraFocusZ);
+
+	if (bAllowLookAroundCam && FramesActiveLookAroundCam) {
+		CVector focus = bCamPrevValid ? PrevCamFocus + (curFocus - PrevCamFocus) * t : curFocus;
+		BuildLookAroundCamera(focus);
+		bCamInterpolated = true;
+		return;
+	}
+
+	if (!bCamPrevValid)
+		return;
+
+	CVector moved = RealCamMatrix.GetPosition() - PrevCamMatrix.GetPosition();
+	if (moved.MagnitudeSqr() > sq(30.0f)) {
+		PrevCamMatrix.CopyOnlyMatrix(RealCamMatrix);
+		return;
+	}
+
+	CMatrix m;
+	m.Interpolate(PrevCamMatrix, RealCamMatrix, t);
+	TheCamera.GetMatrix().CopyOnlyMatrix(m);
+	SyncReplayRwCamera();
+	bCamInterpolated = true;
+}
+// at the start of Idle(), before any logical frame
+void CReplay::RestoreCamera(void)
+{
+	if (!bCamInterpolated)
+		return;
+	TheCamera.GetMatrix().CopyOnlyMatrix(RealCamMatrix);
+	TheCamera.m_vecGameCamPos = RealCamGamePos;
+	SyncReplayRwCamera();
+	bCamInterpolated = false;
 }
 
 void CReplay::ProcessReplayCamera(void)
@@ -1534,33 +1620,15 @@ bool CReplay::ShouldStandardCameraBeProcessed(void)
 	return FindPlayerVehicle() != nil;
 }
 
-void CReplay::ProcessLookAroundCam(void)
+
+
+void CReplay::BuildLookAroundCamera(const CVector &focus)
 {
-	if (!bAllowLookAroundCam)
-		return;
-	float x_moved = CPad::NewMouseControllerState.x / 200.0f;
-	float y_moved = CPad::NewMouseControllerState.y / 200.0f;
-	if (x_moved > 0.01f || y_moved > 0.01f) {
-		if (FramesActiveLookAroundCam == 0)
-			fDistanceLookAroundCam = 9.0f;
-		FramesActiveLookAroundCam = 60;
-	}
-	if (bPlayerInRCBuggy)
-		FramesActiveLookAroundCam = 0;
-	if (!FramesActiveLookAroundCam)
-		return;
-	--FramesActiveLookAroundCam;
-	fBetaAngleLookAroundCam += x_moved;
-	if (CPad::NewMouseControllerState.LMB && CPad::NewMouseControllerState.RMB)
-		fDistanceLookAroundCam = Max(3.0f, Min(15.0f, fDistanceLookAroundCam + 2.0f * y_moved));
-	else
-		fAlphaAngleLookAroundCam = Max(0.1f, Min(1.5f, fAlphaAngleLookAroundCam + y_moved));
 	CVector camera_pt(
 		fDistanceLookAroundCam * Sin(fBetaAngleLookAroundCam) * Cos(fAlphaAngleLookAroundCam),
 		fDistanceLookAroundCam * Cos(fBetaAngleLookAroundCam) * Cos(fAlphaAngleLookAroundCam),
 		fDistanceLookAroundCam * Sin(fAlphaAngleLookAroundCam)
 	);
-	CVector focus = CVector(CameraFocusX, CameraFocusY, CameraFocusZ);
 	camera_pt += focus;
 	CColPoint cp;
 	CEntity* pe = nil;
@@ -1580,14 +1648,52 @@ void CReplay::ProcessLookAroundCam(void)
 	TheCamera.GetUp() = up;
 	TheCamera.GetRight() = right;
 	TheCamera.SetPosition(camera_pt);
-	RwMatrix* pm = RwFrameGetMatrix(RwCameraGetFrame(TheCamera.m_pRwCamera));
-	pm->pos = TheCamera.GetPosition();
-	pm->at = TheCamera.GetForward();
-	pm->up = TheCamera.GetUp();
-	pm->right = TheCamera.GetRight();
-	TheCamera.CalculateDerivedValues();
-	RwMatrixUpdate(RwFrameGetMatrix(RwCameraGetFrame(TheCamera.m_pRwCamera)));
-	RwFrameUpdateObjects(RwCameraGetFrame(TheCamera.m_pRwCamera));
+	SyncReplayRwCamera();
+}
+
+void CReplay::ProcessLookAroundCam(void)
+{
+	if (!bAllowLookAroundCam)
+		return;
+	if (bPlayerInRCBuggy)
+		FramesActiveLookAroundCam = 0;
+	if (FramesActiveLookAroundCam)
+		--FramesActiveLookAroundCam;
+}
+
+// per rendered frame
+void CReplay::ProcessLookAroundInput(void)
+{
+	if (Mode != MODE_PLAYBACK || !bAllowLookAroundCam || bPlayerInRCBuggy)
+		return;
+
+	float x_moved = CPad::NewMouseControllerState.x / 200.0f;
+	float y_moved = CPad::NewMouseControllerState.y / 200.0f;
+
+	if (Abs(x_moved) > 0.001f || Abs(y_moved) > 0.001f) {
+		if (FramesActiveLookAroundCam == 0) {
+			// start the orbit where the camera currently is
+			CVector focus(CameraFocusX, CameraFocusY, CameraFocusZ);
+			CVector d = TheCamera.GetPosition() - focus;
+			float dist = d.Magnitude();
+			if (dist > 0.01f) {
+				fDistanceLookAroundCam = Max(3.0f, Min(15.0f, dist));
+				fBetaAngleLookAroundCam = Atan2(d.x, d.y);
+				fAlphaAngleLookAroundCam = Max(0.1f, Min(1.5f, Asin(Max(-1.0f, Min(1.0f, d.z / dist)))));
+			} else {
+				fDistanceLookAroundCam = 9.0f;
+			}
+		}
+		FramesActiveLookAroundCam = 60;
+	}
+	if (!FramesActiveLookAroundCam)
+		return;
+
+	fBetaAngleLookAroundCam += x_moved;
+	if (CPad::NewMouseControllerState.LMB && CPad::NewMouseControllerState.RMB)
+		fDistanceLookAroundCam = Max(3.0f, Min(15.0f, fDistanceLookAroundCam + 2.0f * y_moved));
+	else
+		fAlphaAngleLookAroundCam = Max(0.1f, Min(1.5f, fAlphaAngleLookAroundCam + y_moved));
 }
 
 size_t CReplay::FindSizeOfPacket(uint8 type)

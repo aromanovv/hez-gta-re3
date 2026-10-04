@@ -272,6 +272,12 @@ private:
 	static float fDistanceLookAroundCam;
 	static float fAlphaAngleLookAroundCam;
 	static float fBetaAngleLookAroundCam;
+	static CMatrix PrevCamMatrix;
+	static CMatrix RealCamMatrix;
+	static CVector RealCamGamePos;
+	static bool bCamPrevValid;
+	static bool bCamInterpolated;
+	
 #ifdef FIX_BUGS
 	static uint8* pGarages;
 	static CFire* FireArray;
@@ -296,10 +302,18 @@ public:
 	static bool ShouldStandardCameraBeProcessed(void) { return true; }
 	static bool IsPlayingBack() { return false; }
 	static bool IsPlayingBackFromFile() { return false; }
+	static void SnapshotCamera(void) {}
+    static void InterpolateCamera(float t) {}
+    static void RestoreCamera(void) {}
+	static void ProcessLookAroundInput(void) {}
 #else
 	static bool ShouldStandardCameraBeProcessed(void);
 	static bool IsPlayingBack() { return Mode == MODE_PLAYBACK; }
 	static bool IsPlayingBackFromFile() { return bPlayingBackFromFile; }
+	static void SnapshotCamera(void);
+	static void InterpolateCamera(float t);
+	static void RestoreCamera(void);
+	static void ProcessLookAroundInput(void);
 private:
 	static void RecordThisFrame(void);
 	static void StorePedUpdate(CPed *ped, int id);
@@ -325,5 +339,7 @@ private:
 	static void FindFirstFocusCoordinate(CVector *coord);
 	static void ProcessLookAroundCam(void);
 	static size_t FindSizeOfPacket(uint8);
+	static CVector PrevCamFocus;
+	static void BuildLookAroundCamera(const CVector &focus);
 #endif
 };

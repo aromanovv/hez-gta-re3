@@ -1806,9 +1806,12 @@ Idle(void *arg)
 	{
 		uint32 logicalFrames = CTimer::GetLogicalFramesPassed();
 		RestoreMovingEntities();
+		CReplay::RestoreCamera();
 		for(uint32 i = 0; i < logicalFrames; i++){
 			CTimer::UpdateLogicalFrame();
+			CReplay::RestoreCamera();
 			SnapshotMovingEntities();
+			CReplay::SnapshotCamera();
 			CPointLights::InitPerLogicalFrame();
 			CGame::Process();
 			CPointLights::EndLogicalFrame();
@@ -1827,8 +1830,13 @@ Idle(void *arg)
 
 	// the camera runs each rendered frame, it has to be smooth whatever the gap between
 	// logical frames
-	if(!CTimer::GetIsPaused() && CReplay::ShouldStandardCameraBeProcessed())
-		TheCamera.Process();
+	if(!CTimer::GetIsPaused()){
+		CReplay::ProcessLookAroundInput();   // NEW: before the check, it can activate the look-around cam
+		if(CReplay::ShouldStandardCameraBeProcessed())
+			TheCamera.Process();
+		else
+			CReplay::InterpolateCamera(CTimer::GetLogicalFrameFraction());
+	}
 	tbEndTimer("CGame::Process");
 	POP_MEMID();
 
