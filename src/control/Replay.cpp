@@ -15,6 +15,7 @@
 #include "Garages.h"
 #endif
 #include "Heli.h"
+#include "ControllerConfig.h"
 #include "main.h"
 #include "Matrix.h"
 #include "ModelIndices.h"
@@ -121,9 +122,11 @@ int CReplay::nHandleOfPlayerPed[NUMPLAYERS];
 CMatrix CReplay::PrevCamMatrix;
 CMatrix CReplay::RealCamMatrix;
 CVector CReplay::RealCamGamePos;
+CVector CReplay::PrevCamFocus;
 bool CReplay::bCamPrevValid;
 bool CReplay::bCamInterpolated;
-CVector CReplay::PrevCamFocus;
+bool CReplay::bFreeCam;
+bool CReplay::bFreeCamKeyWasDown;
 
 static void(*CBArray[])(CAnimBlendAssociation*, void*) =
 {
@@ -228,6 +231,7 @@ void CReplay::Init(void)
 	SlowMotion = 1;
 	FramesActiveLookAroundCam = 0;
 	bDoLoadSceneWhenDone = false;
+	bFreeCam = false; bFreeCamKeyWasDown = false; bCamPrevValid = false; bCamInterpolated = false;
 }
 
 void CReplay::DisableReplays(void)
@@ -707,9 +711,9 @@ void CReplay::StoreCarUpdate(CVehicle *vehicle, int id)
 	vp->health = vehicle->m_fHealth / 4.0f; /* Not anticipated that health can be > 1000. */
 	vp->acceleration = vehicle->m_fGasPedal * 100.0f;
 	vp->panels = vehicle->IsCar() ? ((CAutomobile*)vehicle)->Damage.m_panelStatus : 0;
-	vp->velocityX = 8000.0f * Max(-4.0f, Min(4.0f, vehicle->GetMoveSpeed().x)); /* 8000!? */
-	vp->velocityY = 8000.0f * Max(-4.0f, Min(4.0f, vehicle->GetMoveSpeed().y));
-	vp->velocityZ = 8000.0f * Max(-4.0f, Min(4.0f, vehicle->GetMoveSpeed().z));
+	vp->velocityX = 30.0f * Max(-4.0f, Min(4.0f, vehicle->GetMoveSpeed().x));
+	vp->velocityY = 30.0f * Max(-4.0f, Min(4.0f, vehicle->GetMoveSpeed().y));
+	vp->velocityZ = 30.0f * Max(-4.0f, Min(4.0f, vehicle->GetMoveSpeed().z));
 	vp->mi = vehicle->GetModelIndex();
 	vp->primary_color = vehicle->m_currentColour1;
 	vp->secondary_color = vehicle->m_currentColour2;
@@ -751,7 +755,7 @@ void CReplay::ProcessCarUpdate(CVehicle *vehicle, float interpolation, CAddressI
 	vehicle->m_fGasPedal = vp->acceleration / 100.0f;
 	if (vehicle->IsCar())
 		ApplyPanelDamageToCar(vp->panels, (CAutomobile*)vehicle, true);
-	vehicle->m_vecMoveSpeed = CVector(vp->velocityX / 8000.0f, vp->velocityY / 8000.0f, vp->velocityZ / 8000.0f);
+	vehicle->m_vecMoveSpeed = CVector(vp->velocityX / 30.0f, vp->velocityY / 30.0f, vp->velocityZ / 30.0f);
 	if (vehicle->GetModelIndex() == MI_RHINO) {
 		((CAutomobile*)vehicle)->m_fCarGunLR = vp->car_gun * PI / 128.0f;
 		vehicle->m_fSteerAngle = 0.0f;
@@ -905,6 +909,13 @@ bool CReplay::PlayBackThisFrameInterpolation(CAddressInReplayBuffer *buffer, flo
 					new_p->SetStatus(STATUS_PLAYER_PLAYBACKFROMBUFFER);
 					new_p->GetMatrix().SetUnity();
 					CWorld::Add(new_p);
+
+				#ifdef FIX_BUGS
+					// Fix: Update player ped reference during playback
+					if (ph->index == (nHandleOfPlayerPed[0] >> 8)) {
+						CWorld::Players[0].m_pPed = (CPlayerPed*)new_p;
+					}
+				#endif
 				}
 			}
 			buffer->m_nOffset += sizeof(tPedHeaderPacket);
@@ -1016,6 +1027,8 @@ void CReplay::FinishPlayback(void)
 		return;
 	EmptyAllPools();
 	RestoreStuffFromMem();
+	TheCamera.DontProcessObbeCinemaCamera();
+	bFreeCam = false; bFreeCamKeyWasDown = false; bCamPrevValid = false; bCamInterpolated = false;
 	Mode = MODE_RECORD;
 	if (bDoLoadSceneWhenDone){
 		CVector v_ls(LoadSceneX, LoadSceneY, LoadSceneZ);
@@ -1060,6 +1073,81 @@ static void SyncReplayRwCamera(void)
 	RwFrameUpdateObjects(RwCameraGetFrame(TheCamera.m_pRwCamera));
 }
 
+void CReplay::BuildLookAroundCamera(const CVector &focus)
+{
+	CVector camera_pt(
+		fDistanceLookAroundCam * Sin(fBetaAngleLookAroundCam) * Cos(fAlphaAngleLookAroundCam),
+		fDistanceLookAroundCam * Cos(fBetaAngleLookAroundCam) * Cos(fAlphaAngleLookAroundCam),
+		fDistanceLookAroundCam * Sin(fAlphaAngleLookAroundCam)
+	);
+	camera_pt += focus;
+	CColPoint cp;
+	CEntity* pe = nil;
+	if (CWorld::ProcessLineOfSight(focus, camera_pt, cp, pe, true, false, false, false, false, true, true)){
+		camera_pt = cp.point;
+		CVector direction = focus - cp.point;
+		direction.Normalise();
+		camera_pt += direction / 4.0f;
+	}
+	CVector forward = focus - camera_pt;
+	forward.Normalise();
+	CVector right = CrossProduct(CVector(0.0f, 0.0f, 1.0f), forward);
+	right.Normalise();
+	CVector up = CrossProduct(forward, right);
+	up.Normalise();
+	TheCamera.GetForward() = forward;
+	TheCamera.GetUp() = up;
+	TheCamera.GetRight() = right;
+	TheCamera.SetPosition(camera_pt);
+	SyncReplayRwCamera();
+}
+
+// per rendered frame
+void CReplay::ProcessLookAroundInput(void)
+{
+	if (Mode != MODE_PLAYBACK || !bAllowLookAroundCam) {
+		bFreeCam = false;
+		bFreeCamKeyWasDown = false;
+		return;
+	}
+
+	// own edge detection, this runs per rendered frame
+	bool vDown = ControlsManager.GetIsKeyboardKeyDown((RsKeyCodes)'V') ||
+	             ControlsManager.GetIsKeyboardKeyDown((RsKeyCodes)'v');
+	if (vDown && !bFreeCamKeyWasDown) {
+		bFreeCam = !bFreeCam;
+		if (bFreeCam) {
+			// start the orbit where the camera currently is
+			CVector focus(CameraFocusX, CameraFocusY, CameraFocusZ);
+			CVector d = TheCamera.GetPosition() - focus;
+			float dist = d.Magnitude();
+			if (dist > 0.01f) {
+				fDistanceLookAroundCam = Max(3.0f, Min(15.0f, dist));
+				fBetaAngleLookAroundCam = Atan2(d.x, d.y);
+				fAlphaAngleLookAroundCam = Max(0.1f, Min(1.5f, Asin(Max(-1.0f, Min(1.0f, d.z / dist)))));
+			} else
+				fDistanceLookAroundCam = 9.0f;
+		} else {
+			// hand back to the stock camera
+			TheCamera.CarZoomIndicator = CAM_ZOOM_CINEMATIC;
+			TheCamera.DontProcessObbeCinemaCamera(); // Fix: Reset cinema cam state on mode toggle
+		}
+	}
+	bFreeCamKeyWasDown = vDown;
+
+	if (!bFreeCam)
+		return;
+
+	float x_moved = CPad::NewMouseControllerState.x / 200.0f;
+	float y_moved = CPad::NewMouseControllerState.y / 200.0f;
+	fBetaAngleLookAroundCam += x_moved;
+	if (CPad::NewMouseControllerState.LMB && CPad::NewMouseControllerState.RMB)
+		fDistanceLookAroundCam = Max(3.0f, Min(15.0f, fDistanceLookAroundCam + 2.0f * y_moved));
+	else
+		fAlphaAngleLookAroundCam = Max(0.1f, Min(1.5f, fAlphaAngleLookAroundCam + y_moved));
+}
+
+// before each logical frame
 void CReplay::SnapshotCamera(void)
 {
 	if (Mode != MODE_PLAYBACK) {
@@ -1071,6 +1159,7 @@ void CReplay::SnapshotCamera(void)
 	bCamPrevValid = true;
 }
 
+// once per rendered frame, only when the stock camera is not running
 void CReplay::InterpolateCamera(float t)
 {
 	if (Mode != MODE_PLAYBACK || bCamInterpolated)
@@ -1081,7 +1170,7 @@ void CReplay::InterpolateCamera(float t)
 
 	CVector curFocus(CameraFocusX, CameraFocusY, CameraFocusZ);
 
-	if (bAllowLookAroundCam && FramesActiveLookAroundCam) {
+	if (bFreeCam) {
 		CVector focus = bCamPrevValid ? PrevCamFocus + (curFocus - PrevCamFocus) * t : curFocus;
 		BuildLookAroundCamera(focus);
 		bCamInterpolated = true;
@@ -1091,6 +1180,7 @@ void CReplay::InterpolateCamera(float t)
 	if (!bCamPrevValid)
 		return;
 
+	// a camera cut must not be blended across
 	CVector moved = RealCamMatrix.GetPosition() - PrevCamMatrix.GetPosition();
 	if (moved.MagnitudeSqr() > sq(30.0f)) {
 		PrevCamMatrix.CopyOnlyMatrix(RealCamMatrix);
@@ -1103,6 +1193,7 @@ void CReplay::InterpolateCamera(float t)
 	SyncReplayRwCamera();
 	bCamInterpolated = true;
 }
+
 // at the start of Idle(), before any logical frame
 void CReplay::RestoreCamera(void)
 {
@@ -1113,7 +1204,6 @@ void CReplay::RestoreCamera(void)
 	SyncReplayRwCamera();
 	bCamInterpolated = false;
 }
-
 void CReplay::ProcessReplayCamera(void)
 {
 	switch (CameraMode) {
@@ -1206,6 +1296,8 @@ void CReplay::TriggerPlayback(uint8 cam_mode, float cam_x, float cam_y, float ca
 	}
 	if (cam_mode == REPLAYCAMMODE_ASSTORED)
 		TheCamera.CarZoomIndicator = CAM_ZOOM_CINEMATIC;
+	TheCamera.DontProcessObbeCinemaCamera();
+	bFreeCam = false; bFreeCamKeyWasDown = false; bCamPrevValid = false; bCamInterpolated = false;
 }
 
 void CReplay::StoreStuffInMem(void)
@@ -1471,6 +1563,9 @@ void CReplay::EmptyPedsAndVehiclePools(void)
 		CWorld::Remove(p);
 		delete p;
 	}
+
+	// Fix: Prevent dangling pointer during replay playback
+	CWorld::Players[0].m_pPed = nil;
 }
 
 void CReplay::EmptyAllPools(void)
@@ -1615,85 +1710,14 @@ bool CReplay::ShouldStandardCameraBeProcessed(void)
 {
 	if (Mode != MODE_PLAYBACK)
 		return true;
-	if (FramesActiveLookAroundCam || bPlayerInRCBuggy)
+	if (bFreeCam || bPlayerInRCBuggy)
 		return false;
 	return FindPlayerVehicle() != nil;
 }
 
 
-
-void CReplay::BuildLookAroundCamera(const CVector &focus)
-{
-	CVector camera_pt(
-		fDistanceLookAroundCam * Sin(fBetaAngleLookAroundCam) * Cos(fAlphaAngleLookAroundCam),
-		fDistanceLookAroundCam * Cos(fBetaAngleLookAroundCam) * Cos(fAlphaAngleLookAroundCam),
-		fDistanceLookAroundCam * Sin(fAlphaAngleLookAroundCam)
-	);
-	camera_pt += focus;
-	CColPoint cp;
-	CEntity* pe = nil;
-	if (CWorld::ProcessLineOfSight(focus, camera_pt, cp, pe, true, false, false, false, false, true, true)){
-		camera_pt = cp.point;
-		CVector direction = focus - cp.point;
-		direction.Normalise();
-		camera_pt += direction / 4.0f;
-	}
-	CVector forward = focus - camera_pt;
-	forward.Normalise();
-	CVector right = CrossProduct(CVector(0.0f, 0.0f, 1.0f), forward);
-	right.Normalise();
-	CVector up = CrossProduct(forward, right);
-	up.Normalise();
-	TheCamera.GetForward() = forward;
-	TheCamera.GetUp() = up;
-	TheCamera.GetRight() = right;
-	TheCamera.SetPosition(camera_pt);
-	SyncReplayRwCamera();
-}
-
 void CReplay::ProcessLookAroundCam(void)
 {
-	if (!bAllowLookAroundCam)
-		return;
-	if (bPlayerInRCBuggy)
-		FramesActiveLookAroundCam = 0;
-	if (FramesActiveLookAroundCam)
-		--FramesActiveLookAroundCam;
-}
-
-// per rendered frame
-void CReplay::ProcessLookAroundInput(void)
-{
-	if (Mode != MODE_PLAYBACK || !bAllowLookAroundCam || bPlayerInRCBuggy)
-		return;
-
-	float x_moved = CPad::NewMouseControllerState.x / 200.0f;
-	float y_moved = CPad::NewMouseControllerState.y / 200.0f;
-
-	if (Abs(x_moved) > 0.001f || Abs(y_moved) > 0.001f) {
-		if (FramesActiveLookAroundCam == 0) {
-			// start the orbit where the camera currently is
-			CVector focus(CameraFocusX, CameraFocusY, CameraFocusZ);
-			CVector d = TheCamera.GetPosition() - focus;
-			float dist = d.Magnitude();
-			if (dist > 0.01f) {
-				fDistanceLookAroundCam = Max(3.0f, Min(15.0f, dist));
-				fBetaAngleLookAroundCam = Atan2(d.x, d.y);
-				fAlphaAngleLookAroundCam = Max(0.1f, Min(1.5f, Asin(Max(-1.0f, Min(1.0f, d.z / dist)))));
-			} else {
-				fDistanceLookAroundCam = 9.0f;
-			}
-		}
-		FramesActiveLookAroundCam = 60;
-	}
-	if (!FramesActiveLookAroundCam)
-		return;
-
-	fBetaAngleLookAroundCam += x_moved;
-	if (CPad::NewMouseControllerState.LMB && CPad::NewMouseControllerState.RMB)
-		fDistanceLookAroundCam = Max(3.0f, Min(15.0f, fDistanceLookAroundCam + 2.0f * y_moved));
-	else
-		fAlphaAngleLookAroundCam = Max(0.1f, Min(1.5f, fAlphaAngleLookAroundCam + y_moved));
 }
 
 size_t CReplay::FindSizeOfPacket(uint8 type)

@@ -272,11 +272,15 @@ private:
 	static float fDistanceLookAroundCam;
 	static float fAlphaAngleLookAroundCam;
 	static float fBetaAngleLookAroundCam;
+	
 	static CMatrix PrevCamMatrix;
 	static CMatrix RealCamMatrix;
 	static CVector RealCamGamePos;
+	static CVector PrevCamFocus;
 	static bool bCamPrevValid;
 	static bool bCamInterpolated;
+	static bool bFreeCam;
+	static bool bFreeCamKeyWasDown;
 	
 #ifdef FIX_BUGS
 	static uint8* pGarages;
@@ -303,8 +307,8 @@ public:
 	static bool IsPlayingBack() { return false; }
 	static bool IsPlayingBackFromFile() { return false; }
 	static void SnapshotCamera(void) {}
-    static void InterpolateCamera(float t) {}
-    static void RestoreCamera(void) {}
+	static void InterpolateCamera(float t) {}
+	static void RestoreCamera(void) {}
 	static void ProcessLookAroundInput(void) {}
 #else
 	static bool ShouldStandardCameraBeProcessed(void);
@@ -335,11 +339,10 @@ private:
 	static void EmptyAllPools(void);
 	static void MarkEverythingAsNew(void);
 	static void SaveReplayToHD(void);
-	static void PlayReplayFromHD(void); // out of class in III PC and later because of SecuROM
+	static void PlayReplayFromHD(void);
 	static void FindFirstFocusCoordinate(CVector *coord);
 	static void ProcessLookAroundCam(void);
-	static size_t FindSizeOfPacket(uint8);
-	static CVector PrevCamFocus;
 	static void BuildLookAroundCamera(const CVector &focus);
+	static size_t FindSizeOfPacket(uint8);
 #endif
 };

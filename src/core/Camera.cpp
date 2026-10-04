@@ -2531,6 +2531,11 @@ CCamera::IsItTimeForNewcam(int32 obbeMode, int32 time)
 
 	if(obbeMode < 0)
 		return true;
+	if(CReplay::IsPlayingBack()){
+		uint32 now = CTimer::GetTimeInMilliseconds();
+		if(now < t || now > t + 6000)    // clock went backwards, or camera has been up too long
+			return true;
+	}
 	switch(obbeMode){
 	case OBBE_WHEEL:
 		veh = FindPlayerVehicle();

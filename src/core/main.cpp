@@ -1662,12 +1662,17 @@ BodyJumped(CPhysical *ent)
 		RpAnimBlendClumpGetRootPositions(clump, &prevRoot, &curRoot);
 	CVector moved = cur*curRoot - ent->m_prevMatrix*prevRoot;
 	float canExplain = ent->m_vecMoveSpeed.Magnitude()*CTimer::GetDefaultTimeStep()*2.0f + 0.5f;
+	// the recorded velocity in a replay is not usable, so allow a fast car to cover its distance
+	if(CReplay::IsPlayingBack() && ent->IsVehicle())
+		canExplain = Max(canExplain, 10.0f);
 	return moved.MagnitudeSqr() > sq(canExplain);
 }
 
 static void
 InterpolateEntityMatrix(CPhysical *ent, float t)
 {
+	if(CReplay::IsPlayingBack() && ent->IsVehicle() && BodyJumped(ent))
+		printf("replay: vehicle treated as jumped\n");
 	if(!ent->m_bPrevMatrixValid || ent->m_bInterpolated)
 		return;
 	if(BodyJumped(ent)){
@@ -1809,7 +1814,6 @@ Idle(void *arg)
 		CReplay::RestoreCamera();
 		for(uint32 i = 0; i < logicalFrames; i++){
 			CTimer::UpdateLogicalFrame();
-			CReplay::RestoreCamera();
 			SnapshotMovingEntities();
 			CReplay::SnapshotCamera();
 			CPointLights::InitPerLogicalFrame();
@@ -1831,7 +1835,7 @@ Idle(void *arg)
 	// the camera runs each rendered frame, it has to be smooth whatever the gap between
 	// logical frames
 	if(!CTimer::GetIsPaused()){
-		CReplay::ProcessLookAroundInput();   // NEW: before the check, it can activate the look-around cam
+		CReplay::ProcessLookAroundInput();
 		if(CReplay::ShouldStandardCameraBeProcessed())
 			TheCamera.Process();
 		else
